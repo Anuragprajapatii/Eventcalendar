@@ -140,6 +140,21 @@
             <p class="font-bold">Authentication Status:</p>
             <p id="authStatusText" class="text-sm">Initializing...</p>
             <p id="userIdDisplay" class="text-sm mt-1"></p>
+            <div id="authButtons" class="mt-4 flex justify-center space-x-4" style="display: none;">
+                <button id="signInGoogleBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md shadow-md transition duration-300 ease-in-out">
+                    Sign In with Google
+                </button>
+            </div>
+        </div>
+
+        <!-- Firebase Config Input (hidden by default) -->
+        <div id="firebaseConfigInput" class="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 rounded-lg shadow-md mb-8" style="display: none;">
+            <p class="font-bold mb-2">Firebase Configuration Missing!</p>
+            <p class="text-sm mb-4">Please paste your Firebase project's configuration JSON below to enable cloud features. You can find this in your Firebase project settings &gt; Project settings &gt; Your apps &gt; Web app &gt; Config.</p>
+            <textarea id="firebaseConfigJson" rows="8" class="w-full p-2 border border-yellow-400 rounded-md bg-yellow-50 text-yellow-800 focus:outline-none focus:ring-2 focus:ring-yellow-500"></textarea>
+            <button id="applyConfigBtn" class="mt-4 bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-md shadow-md transition duration-300 ease-in-out">
+                Apply Configuration
+            </button>
         </div>
 
         <!-- Calendar Grid -->
@@ -212,7 +227,7 @@
     <!-- Firebase SDK Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Global Firebase instances and user data
@@ -222,6 +237,7 @@
         let isAuthenticatedUser = false; // True if authenticated (not anonymous)
         let currentYear = new Date().getFullYear(); // Initial year for the calendar
         let events = {}; // Stores events fetched from Firestore, keyed by date (YYYY-MM-DD)
+        let firebaseAppInitialized = false; // Flag to track Firebase initialization
 
         // DOM elements
         const calendarContainer = document.getElementById('calendarContainer');
@@ -240,6 +256,11 @@
         const authWarning = document.getElementById('authWarning');
         const authStatusText = document.getElementById('authStatusText');
         const userIdDisplay = document.getElementById('userIdDisplay');
+        const authButtons = document.getElementById('authButtons');
+        const signInGoogleBtn = document.getElementById('signInGoogleBtn');
+        const firebaseConfigInput = document.getElementById('firebaseConfigInput');
+        const firebaseConfigJson = document.getElementById('firebaseConfigJson');
+        const applyConfigBtn = document.getElementById('applyConfigBtn');
 
         // --- Utility Functions ---
 
@@ -526,10 +547,69 @@
         // --- Firebase Functions ---
 
         /**
+         * Initializes Firebase app and authentication.
+         * Handles both Canvas environment variables and manual config input.
+         * @param {object} config Firebase config object.
+         * @param {string} [authToken] Optional custom authentication token.
+         */
+        async function initializeFirebaseApp(config, authToken = null) {
+            try {
+                const app = initializeApp(config);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                firebaseAppInitialized = true; // Set flag to true
+
+                if (authToken) {
+                    await signInWithCustomToken(auth, authToken);
+                } else {
+                    // If no custom token, try anonymous sign-in or wait for Google Sign-In
+                    await signInAnonymously(auth);
+                }
+
+                // Listen for auth state changes
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        isAuthenticatedUser = !user.isAnonymous; // True if authenticated (not anonymous)
+                        authStatusText.textContent = isAuthenticatedUser ? "Authenticated (Can Edit Events)" : "Anonymous (View Only)";
+                        userIdDisplay.textContent = `User ID: ${currentUserId}`;
+                        authButtons.style.display = isAuthenticatedUser ? 'none' : 'flex'; // Hide if authenticated, show if anonymous
+                        console.log("Firebase initialized. User ID:", currentUserId, "Authenticated:", isAuthenticatedUser);
+                    } else {
+                        currentUserId = crypto.randomUUID(); // Fallback for unauthenticated or anonymous
+                        isAuthenticatedUser = false;
+                        authStatusText.textContent = "Anonymous (View Only)";
+                        userIdDisplay.textContent = `User ID: ${currentUserId}`;
+                        authButtons.style.display = 'flex'; // Show sign-in button if not authenticated
+                        console.log("Firebase initialized. User is anonymous or not authenticated.");
+                    }
+                    // After auth state is known, set up event listener and render calendar
+                    if (firebaseAppInitialized) { // Only setup listener if Firebase app is truly initialized
+                        setupEventsListener();
+                    }
+                });
+
+                // Hide config input and show auth buttons if Firebase is initialized
+                firebaseConfigInput.style.display = 'none';
+                authButtons.style.display = 'flex';
+
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                showMessage("Failed to initialize Firebase. Please check your configuration.", "error");
+                authStatusText.textContent = "Error initializing app.";
+                firebaseConfigInput.style.display = 'block'; // Show config input on error
+            }
+        }
+
+        /**
          * Fetches events for the current year from Firestore and updates the calendar.
          * Uses onSnapshot for real-time updates.
          */
         function setupEventsListener() {
+            if (!db) {
+                console.warn("Firestore not initialized. Cannot set up event listener.");
+                return;
+            }
             const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
             const eventsCollectionRef = collection(db, `artifacts/${appId}/public/data/events`);
 
@@ -566,6 +646,10 @@
 
             if (!isAuthenticatedUser) {
                 showMessage("You must be authenticated to add or edit events.", "error");
+                return;
+            }
+            if (!db) {
+                showMessage("Database not initialized. Please ensure Firebase is configured.", "error");
                 return;
             }
 
@@ -622,6 +706,10 @@
                 showMessage("You must be authenticated to delete events.", "error");
                 return;
             }
+            if (!db) {
+                showMessage("Database not initialized. Please ensure Firebase is configured.", "error");
+                return;
+            }
 
             const eventId = document.getElementById('eventId').value;
             if (!eventId) {
@@ -670,61 +758,61 @@
         // --- Initialization and Event Listeners ---
 
         window.onload = async function() {
-            try {
-                // Initialize Firebase
-                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
+            // Check for Canvas environment variables
+            const canvasFirebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+            const canvasAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-                // Authenticate user
-                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
+            if (canvasFirebaseConfig) {
+                // Use Canvas provided config and token
+                await initializeFirebaseApp(canvasFirebaseConfig, canvasAuthToken);
+            } else {
+                // If not in Canvas, show Firebase config input
+                firebaseConfigInput.style.display = 'block';
+                authStatusText.textContent = "Firebase not configured.";
 
-                // Listen for auth state changes
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        currentUserId = user.uid;
-                        isAuthenticatedUser = !user.isAnonymous; // True if authenticated (not anonymous)
-                        authStatusText.textContent = isAuthenticatedUser ? "Authenticated (Can Edit Events)" : "Anonymous (View Only)";
-                        userIdDisplay.textContent = `User ID: ${currentUserId}`;
-                        console.log("Firebase initialized. User ID:", currentUserId, "Authenticated:", isAuthenticatedUser);
-                    } else {
-                        currentUserId = crypto.randomUUID(); // Fallback for unauthenticated or anonymous
-                        isAuthenticatedUser = false;
-                        authStatusText.textContent = "Anonymous (View Only)";
-                        userIdDisplay.textContent = `User ID: ${currentUserId}`;
-                        console.log("Firebase initialized. User is anonymous or not authenticated.");
+                applyConfigBtn.addEventListener('click', async () => {
+                    try {
+                        const userConfig = JSON.parse(firebaseConfigJson.value);
+                        await initializeFirebaseApp(userConfig);
+                        firebaseConfigInput.style.display = 'none'; // Hide input on successful config
+                    } catch (error) {
+                        console.error("Invalid Firebase JSON config:", error);
+                        showMessage("Invalid Firebase JSON configuration. Please check the format.", "error");
                     }
-                    // After auth state is known, set up event listener and render calendar
-                    setupEventsListener();
                 });
-
-                // Event listeners for year navigation
-                prevYearBtn.addEventListener('click', () => {
-                    currentYear--;
-                    setupEventsListener(); // Re-fetch events for the new year
-                });
-                nextYearBtn.addEventListener('click', () => {
-                    currentYear++;
-                    setupEventsListener(); // Re-fetch events for the new year
-                });
-
-                // Event form submission listener
-                eventForm.addEventListener('submit', handleEventFormSubmit);
-
-                // Delete event button listener
-                deleteEventBtn.addEventListener('click', handleDeleteEvent);
-
-            } catch (error) {
-                console.error("Error initializing Firebase or application:", error);
-                showMessage("Failed to initialize the application. Please check console for details.", "error");
-                authStatusText.textContent = "Error initializing app.";
             }
+
+            // Google Sign-In button listener
+            signInGoogleBtn.addEventListener('click', async () => {
+                if (!auth) {
+                    showMessage("Firebase Auth not initialized. Please configure Firebase first.", "error");
+                    return;
+                }
+                try {
+                    const provider = new GoogleAuthProvider();
+                    await signInWithPopup(auth, provider);
+                    showMessage("Signed in with Google successfully!", "success");
+                } catch (error) {
+                    console.error("Error signing in with Google:", error);
+                    showMessage(`Google Sign-In failed: ${error.message}`, "error");
+                }
+            });
+
+            // Event listeners for year navigation
+            prevYearBtn.addEventListener('click', () => {
+                currentYear--;
+                setupEventsListener(); // Re-fetch events for the new year
+            });
+            nextYearBtn.addEventListener('click', () => {
+                currentYear++;
+                setupEventsListener(); // Re-fetch events for the new year
+            });
+
+            // Event form submission listener
+            eventForm.addEventListener('submit', handleEventFormSubmit);
+
+            // Delete event button listener
+            deleteEventBtn.addEventListener('click', handleDeleteEvent);
         };
     </script>
 
